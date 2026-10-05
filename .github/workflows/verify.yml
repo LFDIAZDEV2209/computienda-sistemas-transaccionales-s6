@@ -1,0 +1,38 @@
+name: Verify MySQL and Java
+on: [push, workflow_dispatch]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: app/pom.xml
+      - name: Build image and start MySQL
+        run: docker compose up -d --build --wait
+      - name: Run transaction examples
+        run: docker compose exec -T mysql mysql -uroot -proot2026 computienda < database/transactions.sql
+      - name: Check atomicity, rollback and validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          sql() { docker compose exec -T mysql mysql -uroot -proot2026 -N -B computienda -e "$1"; }
+          test "$(sql 'SELECT COUNT(*) FROM Facturas')" = 2
+          test "$(sql 'SELECT COUNT(*) FROM Compras')" = 2
+          test "$(sql 'SELECT cantidad_inventario FROM Productos WHERE codigo_producto=1')" = 19
+          test "$(sql 'SELECT cantidad_inventario FROM Productos WHERE codigo_producto=2')" = 80
+          test "$(sql 'SELECT precio_venta FROM Productos WHERE codigo_producto=3')" = 249900.00
+          test "$(sql 'SELECT COUNT(*) FROM Clientes WHERE correo_electronico="crud-delete@example.com"')" = 0
+          if sql 'CALL registrar_compra(1,1,9999)'; then exit 1; fi
+          if sql 'CALL registrar_compra(1,1,0)'; then exit 1; fi
+          if sql 'CALL registrar_compra(9999,1,1)'; then exit 1; fi
+          test "$(sql 'SELECT COUNT(*) FROM Compras')" = 2
+          test "$(sql 'SELECT COUNT(*) FROM Facturas WHERE total_factura <> cantidad_comprada * precio_unitario')" = 0
+      - name: Build and execute Java client
+        run: mvn -B -f app/pom.xml package exec:java
+      - name: Show container status
+        if: always()
+        run: docker compose ps
